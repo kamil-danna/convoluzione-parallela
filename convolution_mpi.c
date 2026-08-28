@@ -8,7 +8,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// -- Strutture e utilità base (identiche alle precedenti) --
+// -- Strutture e utilità base --
 typedef struct
 {
     int width, height, max_val;
@@ -34,7 +34,20 @@ PGMImage *read_pgm(const char *filename)
     }
     PGMImage *img = (PGMImage *)malloc(sizeof(PGMImage));
     char format[3];
-    fscanf(file, "%2s", format);
+
+    // Controllo lettura formato
+    if (fscanf(file, "%2s", format) != 1)
+    {
+        fprintf(stderr, "Errore: impossibile leggere il formato del file.\n");
+        exit(1);
+    }
+
+    if (strcmp(format, "P5") != 0)
+    {
+        fprintf(stderr, "Errore: il file non è un PGM binario (P5)\n");
+        exit(1);
+    }
+
     int c = getc(file);
     while (c == '#' || c == '\n' || c == ' ' || c == '\r')
     {
@@ -45,10 +58,23 @@ PGMImage *read_pgm(const char *filename)
             c = getc(file);
     }
     ungetc(c, file);
-    fscanf(file, "%d %d %d", &img->width, &img->height, &img->max_val);
+
+    if (fscanf(file, "%d %d %d", &img->width, &img->height, &img->max_val) != 3)
+    {
+        fprintf(stderr, "Errore: impossibile leggere le dimensioni o il valore massimo.\n");
+        exit(1);
+    }
     fgetc(file);
-    img->data = (unsigned char *)malloc(img->width * img->height);
-    fread(img->data, 1, img->width * img->height, file);
+
+    int size = img->width * img->height;
+    img->data = (unsigned char *)malloc(size);
+
+    if (fread(img->data, 1, size, file) != (size_t)size)
+    {
+        fprintf(stderr, "Errore: lettura dei pixel fallita o file troncato.\n");
+        exit(1);
+    }
+
     fclose(file);
     return img;
 }
@@ -56,8 +82,22 @@ PGMImage *read_pgm(const char *filename)
 void write_pgm(const char *filename, PGMImage *img)
 {
     FILE *file = fopen(filename, "wb");
+    if (!file)
+    {
+        fprintf(stderr, "Errore: impossibile creare %s\n", filename);
+        exit(1);
+    }
+
     fprintf(file, "P5\n%d %d\n%d\n", img->width, img->height, img->max_val);
-    fwrite(img->data, 1, img->width * img->height, file);
+
+    int size = img->width * img->height;
+
+    if (fwrite(img->data, 1, size, file) != (size_t)size)
+    {
+        fprintf(stderr, "Errore: scrittura dei pixel fallita.\n");
+        exit(1);
+    }
+
     fclose(file);
 }
 
@@ -80,7 +120,6 @@ float *generate_gaussian_kernel(int k_size)
     return kernel;
 }
 
-// -- MAIN MPI --
 int main(int argc, char *argv[])
 {
     MPI_Init(&argc, &argv);
@@ -100,12 +139,11 @@ int main(int argc, char *argv[])
     const char *input_file = argv[1];
     const char *output_file = argv[2];
     int k_size = atoi(argv[3]);
-    int r = k_size / 2; // Raggio del kernel (numero di righe halo)
+    int r = k_size / 2;
 
     PGMImage *img = NULL;
     int width = 0, height = 0, max_val = 0;
 
-    // Rank 0 legge l'immagine
     if (rank == 0)
     {
         img = read_pgm(input_file);
@@ -145,14 +183,15 @@ int main(int argc, char *argv[])
     unsigned char *local_out = malloc(local_rows * width);
 
     MPI_Barrier(MPI_COMM_WORLD);
-    double start_time = MPI_Wtime(); // ---- INIZIO TIMER MPI ----
+    // ---- INIZIO TIMER MPI ----
+    double start_time = MPI_Wtime();
 
     // Rank 0 distribuisce l'immagine a pezzi
     MPI_Scatterv(rank == 0 ? img->data : NULL, sendcounts, displs, MPI_UNSIGNED_CHAR,
                  local_data, local_rows * width, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
 
     // -- INIZIO SCAMBIO HALO --
-    // Creiamo un buffer più grande per contenere anche le righe "fantasma" sopra e sotto
+    // Creiamo un buffer più grande per contenere anche le righe "ghost" sopra e sotto
     int padded_rows = local_rows + 2 * r;
     unsigned char *padded_data = malloc(padded_rows * width);
 
@@ -210,7 +249,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // -- RACCOLTA (GATHER) --
+    // -- RACCOLTA --
     PGMImage *out_img = NULL;
     if (rank == 0)
     {
@@ -225,7 +264,8 @@ int main(int argc, char *argv[])
                 rank == 0 ? out_img->data : NULL, sendcounts, displs, MPI_UNSIGNED_CHAR,
                 0, MPI_COMM_WORLD);
 
-    double end_time = MPI_Wtime(); // ---- FINE TIMER MPI ----
+    // ---- FINE TIMER MPI ----
+    double end_time = MPI_Wtime();
 
     if (rank == 0)
     {

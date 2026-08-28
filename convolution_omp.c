@@ -2,14 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <sys/time.h>
 #include <omp.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-// Struttura per l'immagine PGM
 typedef struct
 {
     int width;
@@ -18,8 +16,6 @@ typedef struct
     unsigned char *data;
 } PGMImage;
 
-// Funzione di utilità per il CLAMPING
-// Mantiene le coordinate (x, y) all'interno dei bordi dell'immagine
 int clamp(int val, int min, int max)
 {
     if (val < min)
@@ -29,7 +25,6 @@ int clamp(int val, int min, int max)
     return val;
 }
 
-// Funzione per leggere un'immagine PGM (formato binario P5)
 PGMImage *read_pgm(const char *filename)
 {
     FILE *file = fopen(filename, "rb");
@@ -41,44 +36,57 @@ PGMImage *read_pgm(const char *filename)
 
     PGMImage *img = (PGMImage *)malloc(sizeof(PGMImage));
     char format[3];
-    fscanf(file, "%2s", format);
+
+    if (fscanf(file, "%2s", format) != 1)
+    {
+        fprintf(stderr, "Errore: impossibile leggere il formato del file.\n");
+        exit(1);
+    }
+
     if (strcmp(format, "P5") != 0)
     {
         fprintf(stderr, "Errore: il file non è un PGM binario (P5)\n");
         exit(1);
     }
 
-    // Salta i commenti
     int c = getc(file);
     while (c == '#' || c == '\n' || c == ' ' || c == '\r')
     {
         if (c == '#')
-        {
             while (getc(file) != '\n')
-                ; // Salta fino a fine riga
-        }
+                ;
         else
-        {
             c = getc(file);
-        }
     }
     ungetc(c, file);
 
-    // Leggi dimensioni e valore massimo
-    fscanf(file, "%d %d", &img->width, &img->height);
-    fscanf(file, "%d", &img->max_val);
-    fgetc(file); // Consuma il carattere newline dopo il max_val
+    if (fscanf(file, "%d %d", &img->width, &img->height) != 2)
+    {
+        fprintf(stderr, "Errore: impossibile leggere le dimensioni dell'immagine.\n");
+        exit(1);
+    }
 
-    // Alloca memoria e leggi i pixel
+    if (fscanf(file, "%d", &img->max_val) != 1)
+    {
+        fprintf(stderr, "Errore: impossibile leggere il valore massimo.\n");
+        exit(1);
+    }
+
+    fgetc(file);
+
     int size = img->width * img->height;
     img->data = (unsigned char *)malloc(size * sizeof(unsigned char));
-    fread(img->data, sizeof(unsigned char), size, file);
+
+    if (fread(img->data, sizeof(unsigned char), size, file) != (size_t)size)
+    {
+        fprintf(stderr, "Errore: lettura dei pixel fallita o file troncato.\n");
+        exit(1);
+    }
 
     fclose(file);
     return img;
 }
 
-// Funzione per salvare un'immagine PGM
 void write_pgm(const char *filename, PGMImage *img)
 {
     FILE *file = fopen(filename, "wb");
@@ -89,11 +97,16 @@ void write_pgm(const char *filename, PGMImage *img)
     }
 
     fprintf(file, "P5\n%d %d\n%d\n", img->width, img->height, img->max_val);
-    fwrite(img->data, sizeof(unsigned char), img->width * img->height, file);
+
+    if (fwrite(img->data, sizeof(unsigned char), img->width * img->height, file) != (size_t)(img->width * img->height))
+    {
+        fprintf(stderr, "Errore: scrittura dei pixel fallita.\n");
+        exit(1);
+    }
+
     fclose(file);
 }
 
-// Libera la memoria
 void free_pgm(PGMImage *img)
 {
     if (img)
@@ -103,14 +116,12 @@ void free_pgm(PGMImage *img)
     }
 }
 
-// Genera un kernel Gaussiano 1D/2D
-// La dimensione 'k_size' deve essere dispari (es. 3, 5, 7, 9)
 float *generate_gaussian_kernel(int k_size)
 {
     float *kernel = (float *)malloc(k_size * k_size * sizeof(float));
     float sum = 0.0f;
     int r = k_size / 2;
-    float sigma = 1.0f; // Modifica questo valore per variare l'intensità della sfocatura (blur)
+    float sigma = 1.0f;
     float s = 2.0f * sigma * sigma;
 
     for (int x = -r; x <= r; x++)
@@ -124,8 +135,6 @@ float *generate_gaussian_kernel(int k_size)
         }
     }
 
-    // Normalizza il kernel in modo che la somma di tutti gli elementi sia 1.0
-    // Questo previene che l'immagine diventi più chiara o più scura
     for (int i = 0; i < k_size * k_size; i++)
     {
         kernel[i] /= sum;
@@ -134,8 +143,7 @@ float *generate_gaussian_kernel(int k_size)
     return kernel;
 }
 
-// Convoluzione Sequenziale (Baseline)
-PGMImage *convolution_seq(PGMImage *input, float *kernel, int k_size)
+PGMImage *convolution_omp(PGMImage *input, float *kernel, int k_size)
 {
     PGMImage *output = (PGMImage *)malloc(sizeof(PGMImage));
     output->width = input->width;
@@ -145,6 +153,7 @@ PGMImage *convolution_seq(PGMImage *input, float *kernel, int k_size)
 
     int r = k_size / 2;
 
+// Parallelizzazione del ciclo esterno
 #pragma omp parallel for
     for (int y = 0; y < input->height; y++)
     {
@@ -152,12 +161,10 @@ PGMImage *convolution_seq(PGMImage *input, float *kernel, int k_size)
         {
             float sum = 0.0f;
 
-            // Applica il kernel
             for (int ky = -r; ky <= r; ky++)
             {
                 for (int kx = -r; kx <= r; kx++)
                 {
-                    // Usa la funzione clamp per gestire i bordi (evita segmentation fault)
                     int px = clamp(x + kx, 0, input->width);
                     int py = clamp(y + ky, 0, input->height);
 
@@ -168,7 +175,6 @@ PGMImage *convolution_seq(PGMImage *input, float *kernel, int k_size)
                 }
             }
 
-            // Assicuriamoci che il valore finale sia compreso tra 0 e 255
             int final_pixel = (int)sum;
             if (final_pixel < 0)
                 final_pixel = 0;
@@ -182,10 +188,8 @@ PGMImage *convolution_seq(PGMImage *input, float *kernel, int k_size)
     return output;
 }
 
-// Main aggiornato per leggere gli argomenti
 int main(int argc, char *argv[])
 {
-    // Controllo argomenti
     if (argc != 4)
     {
         printf("Uso: %s <input.pgm> <output.pgm> <kernel_size>\n", argv[0]);
@@ -197,33 +201,36 @@ int main(int argc, char *argv[])
     const char *output_file = argv[2];
     int k_size = atoi(argv[3]);
 
-    // Validazione dimensione kernel
     if (k_size % 2 == 0 || k_size > 9 || k_size < 3)
     {
         fprintf(stderr, "Errore: La dimensione del kernel deve essere un numero dispari compreso tra 3 e 9.\n");
         return 1;
     }
 
-    printf("Inizio elaborazione sequenziale...\n");
+    int num_threads = 0;
+#pragma omp parallel
+    {
+#pragma omp single
+        num_threads = omp_get_num_threads();
+    }
+
+    printf("Inizio elaborazione OpenMP (%d thread)...\n", num_threads);
     printf("- Immagine: %s\n", input_file);
     printf("- Kernel: %dx%d\n", k_size, k_size);
 
     PGMImage *img = read_pgm(input_file);
     float *kernel = generate_gaussian_kernel(k_size);
 
-    // ---------------- TIMER START ----------------
-    struct timeval start, end;
-    gettimeofday(&start, NULL);
+    // ---------------- TIMER START --------------
+    double start_time = omp_get_wtime();
 
-    // Esecuzione della convoluzione
-    PGMImage *out_img = convolution_seq(img, kernel, k_size);
+    // Esecuzione
+    PGMImage *out_img = convolution_omp(img, kernel, k_size);
 
     // ---------------- TIMER STOP ----------------
-    gettimeofday(&end, NULL);
+    double end_time = omp_get_wtime();
 
-    // Calcola il tempo in secondi
-    double time_spent = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0;
-    printf("Tempo di convoluzione: %.4f secondi\n", time_spent);
+    printf("Tempo di convoluzione OpenMP: %.4f secondi\n", end_time - start_time);
 
     write_pgm(output_file, out_img);
 

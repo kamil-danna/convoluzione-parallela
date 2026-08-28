@@ -35,7 +35,18 @@ PGMImage *read_pgm(const char *filename)
     }
     PGMImage *img = (PGMImage *)malloc(sizeof(PGMImage));
     char format[3];
-    fscanf(file, "%2s", format);
+    o if (fscanf(file, "%2s", format) != 1)
+    {
+        fprintf(stderr, "Errore: impossibile leggere il formato del file.\n");
+        exit(1);
+    }
+
+    if (strcmp(format, "P5") != 0)
+    {
+        fprintf(stderr, "Errore: il file non è un PGM binario (P5)\n");
+        exit(1);
+    }
+
     int c = getc(file);
     while (c == '#' || c == '\n' || c == ' ' || c == '\r')
     {
@@ -46,10 +57,23 @@ PGMImage *read_pgm(const char *filename)
             c = getc(file);
     }
     ungetc(c, file);
-    fscanf(file, "%d %d %d", &img->width, &img->height, &img->max_val);
+
+    if (fscanf(file, "%d %d %d", &img->width, &img->height, &img->max_val) != 3)
+    {
+        fprintf(stderr, "Errore: impossibile leggere le dimensioni o il valore massimo.\n");
+        exit(1);
+    }
     fgetc(file);
-    img->data = (unsigned char *)malloc(img->width * img->height);
-    fread(img->data, 1, img->width * img->height, file);
+
+    int size = img->width * img->height;
+    img->data = (unsigned char *)malloc(size);
+
+    if (fread(img->data, 1, size, file) != (size_t)size)
+    {
+        fprintf(stderr, "Errore: lettura dei pixel fallita o file troncato.\n");
+        exit(1);
+    }
+
     fclose(file);
     return img;
 }
@@ -57,8 +81,22 @@ PGMImage *read_pgm(const char *filename)
 void write_pgm(const char *filename, PGMImage *img)
 {
     FILE *file = fopen(filename, "wb");
+    if (!file)
+    {
+        fprintf(stderr, "Errore: impossibile creare %s\n", filename);
+        exit(1);
+    }
+
     fprintf(file, "P5\n%d %d\n%d\n", img->width, img->height, img->max_val);
-    fwrite(img->data, 1, img->width * img->height, file);
+
+    int size = img->width * img->height;
+
+    if (fwrite(img->data, 1, size, file) != (size_t)size)
+    {
+        fprintf(stderr, "Errore: scrittura dei pixel fallita.\n");
+        exit(1);
+    }
+
     fclose(file);
 }
 
@@ -81,10 +119,9 @@ float *generate_gaussian_kernel(int k_size)
     return kernel;
 }
 
-// -- MAIN IBRIDO --
 int main(int argc, char *argv[])
 {
-    // 1. DIFFERENZA CRUCIALE: Inizializziamo MPI con il supporto per i thread!
+    // Inizializziamo MPI con il supporto per i thread
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
     if (provided < MPI_THREAD_FUNNELED)
@@ -179,7 +216,7 @@ int main(int argc, char *argv[])
             memcpy(padded_data + ((r + local_rows + i) * width), padded_data + ((r + local_rows - 1) * width), width);
     }
 
-// 2. DIFFERENZA CRUCIALE: Aggiungiamo OpenMP per calcolare il nostro blocco locale!
+// Aggiungiamo OpenMP per calcolare il nostro blocco locale!
 #pragma omp parallel for
     for (int y = 0; y < local_rows; y++)
     {
@@ -224,7 +261,6 @@ int main(int argc, char *argv[])
 
     if (rank == 0)
     {
-        // Stampiamo anche quanti thread sta usando il Rank 0 (dovrebbero essere uguali per tutti)
         int num_threads = 1;
 #pragma omp parallel
         {
